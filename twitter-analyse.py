@@ -17,6 +17,7 @@ rank = comm.Get_rank()
 size = comm.Get_size()
 
 # TODO 优化合并策略
+# TODO 变量名 小驼峰， 函数名 大驼峰
 def merge_dicts(dict1, dict2):
     for key, value in dict2.items():
         if key in dict1:
@@ -69,6 +70,7 @@ with open(file_path, 'r', encoding='utf-8') as tweet_file:
             happy_day_dict[hour] = happy_day_dict.get(hour, 0) + sentiment
             happy_hour_dict[day] = happy_day_dict.get(hour, 0) + sentiment
 
+        # TODO 改分组的逻辑
         current_position += len(tweet_str)
 
 dict_list_list = comm.gather([happy_hour_dict, happy_day_dict, active_hour_dict, active_day_dict], root=0)
