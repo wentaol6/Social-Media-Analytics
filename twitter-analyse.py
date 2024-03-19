@@ -16,6 +16,18 @@ comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
 size = comm.Get_size()
 
+# find the largest json file
+def find_largest_json_file(directory="."): 
+    json_files = [file for file in os.listdir(directory) if file.endswith(".json")] #loop for the json file
+    if not json_files:
+        return None  # if there is no json file, return none
+
+    largest_file = max(json_files, key=lambda file: os.path.getsize(os.path.join(directory, file)))#find the largest json file
+    return largest_file
+
+largest_json_file = find_largest_json_file()
+print(largest_json_file)
+
 # TODO 优化合并策略
 # TODO 变量名 小驼峰， 函数名 大驼峰
 def merge_dicts(dict1, dict2):
