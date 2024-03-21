@@ -6,17 +6,17 @@ from mpi4py import MPI
 
 begin_time = datetime.datetime.now()
 
-happy_hour_dict = {}
-happy_day_dict = {}
-active_hour_dict = {}
-active_day_dict = {}
+# {day : (cnt, sentiment)}
+# {hour  : (cnt, sentiment)}
+hour_stats_dict = {}
+day_stats_dict = {}
 
 comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
 size = comm.Get_size()
 
 # find the largest json file
-def find_largest_json_file(directory="."): 
+def find_largest_json_file(directory="."):
     json_files = [file for file in os.listdir(directory) if file.endswith(".json")] #loop for the json file
     if not json_files:
         print("No json file found!")
@@ -25,13 +25,15 @@ def find_largest_json_file(directory="."):
     largest_file = max(json_files, key=lambda file: os.path.getsize(os.path.join(directory, file)))#find the largest json file
     return largest_file
 
-def merge_dicts(dict1, dict2):
-    for key, value in dict2.items():
-        if key in dict1:
-            dict1[key] += value
+# merge dicts
+def merge_dicts(main_dict, merging_dict):
+    for key, (new_count, new_sentiment_sum) in merging_dict.items():
+        if key in main_dict:
+            current_count, current_sentiment_sum = main_dict[key]
+            main_dict[key] = (current_count + new_count, current_sentiment_sum + new_sentiment_sum)
         else:
-            dict1[key] = value
-    return dict1
+            main_dict[key] = (new_count, new_sentiment_sum)
+    return main_dict
 
 def get_params(tweet: json):
     data = tweet.get('doc').get('data')
@@ -40,7 +42,7 @@ def get_params(tweet: json):
     sentiment = data.get('sentiment', None)
     return hour, day, sentiment
 
-file_path = find_largest_json_file()
+file_path = 'twitter-50mb.json'
 
 total_bytes = os.path.getsize(file_path)
 each_bytes = total_bytes // size
@@ -61,42 +63,55 @@ with open(file_path, 'r', encoding='utf-8') as tweet_file:
         hour, day, sentiment = get_params(tweet)
         print(f"rank {rank}: hour{hour}")
 
-        if hour not in happy_hour_dict:
-            active_hour_dict[hour] = 0
-            happy_hour_dict[hour] = 0
+        hour_cnt = 0
+        hour_sentiment = 0.0
+        day_cnt = 0
+        day_sentiment = 0.0
 
-        if day not in happy_day_dict:
-            active_day_dict[day] = 0
-            happy_day_dict[day] = 0
+        if hour in hour_stats_dict:
+            hour_cnt, hour_sentiment = hour_stats_dict[hour]
 
-        active_hour_dict[hour] += 1
-        active_day_dict[day] += 1
+        if day in day_stats_dict:
+            day_cnt, day_sentiment = day_stats_dict[day]
+
+        hour_cnt += 1
+        day_cnt += 1
 
         if sentiment and isinstance(sentiment, float):
-            happy_day_dict[day] = happy_day_dict.get(day, 0) + sentiment
-            happy_hour_dict[hour] = happy_hour_dict.get(hour, 0) + sentiment
+            hour_sentiment += sentiment
+            day_sentiment += sentiment
+
+        hour_stats_dict[hour] = (hour_cnt, hour_sentiment)
+        day_stats_dict[day] = (day_cnt, day_sentiment)
 
         # 这里可能不准确，会导致bug数据错误
         current_position += len(tweet_str)
 
-dict_list_list = comm.gather([happy_hour_dict, happy_day_dict, active_hour_dict, active_day_dict], root=0)
-
-happy_hour_dict = {}
-happy_day_dict = {}
-active_hour_dict = {}
-active_day_dict = {}
+all_hour_stats = comm.gather(hour_stats_dict, root=0)
+all_day_stats = comm.gather(day_stats_dict, root=0)
 
 if rank == 0:
-    for dict_list in dict_list_list:
-        happy_hour_dict = merge_dicts(happy_hour_dict, dict_list[0])
-        happy_day_dict = merge_dicts(happy_day_dict, dict_list[1])
-        active_hour_dict = merge_dicts(active_hour_dict, dict_list[2])
-        active_day_dict = merge_dicts(active_day_dict, dict_list[3])
+    combined_hour_stats = {}
+    combined_day_stats = {}
 
-    print(list(dict(sorted(happy_hour_dict.items(), key=lambda item: item[1])).items())[-1])
-    print(list(dict(sorted(happy_day_dict.items(), key=lambda item: item[1])).items())[-1])
-    print(list(dict(sorted(active_hour_dict.items(), key=lambda item: item[1])).items())[-1])
-    print(list(dict(sorted(active_day_dict.items(), key=lambda item: item[1])).items())[-1])
+    # merge hour dict
+    for hour_stats in all_hour_stats:
+        combined_hour_stats = merge_dicts(combined_hour_stats, hour_stats)
+
+    # merge day dict
+    for day_stats in all_day_stats:
+        combined_day_stats = merge_dicts(combined_day_stats, day_stats)
+
+    # Identify the hour and day with the highest sentiment sum and most records
+    max_sentiment_hour = max(combined_hour_stats.items(), key=lambda item: item[1][1])
+    max_records_hour = max(combined_hour_stats.items(), key=lambda item: item[1][0])
+    max_sentiment_day = max(combined_day_stats.items(), key=lambda item: item[1][1])
+    max_records_day = max(combined_day_stats.items(), key=lambda item: item[1][0])
+
+    print(f"Hour with highest sentiment: {max_sentiment_hour[0]} (Sentiment: {max_sentiment_hour[1][1]})")
+    print(f"Day with highest sentiment: {max_sentiment_day[0]} (Sentiment: {max_sentiment_day[1][1]})")
+    print(f"Hour with most records: {max_records_hour[0]} (Records: {max_records_hour[1][0]})")
+    print(f"Day with most records: {max_records_day[0]} (Records: {max_records_day[1][0]})")
 
     finish_time = datetime.datetime.now()
-    print(finish_time - begin_time)
+    print(f"Total processing time: {finish_time - begin_time}")
