@@ -15,17 +15,17 @@ comm = MPI.COMM_WORLD
 rank = comm.Get_rank()
 size = comm.Get_size()
 
-# find the largest json file
+
 def find_largest_json_file(directory="."):
-    json_files = [file for file in os.listdir(directory) if file.endswith(".json")] #loop for the json file
+    json_files = [file for file in os.listdir(directory) if file.endswith(".json")]
     if not json_files:
         print("No json file found!")
         sys.exit()
 
-    largest_file = max(json_files, key=lambda file: os.path.getsize(os.path.join(directory, file)))#find the largest json file
+    largest_file = max(json_files, key=lambda file: os.path.getsize(os.path.join(directory, file)))
     return largest_file
 
-# merge dicts
+
 def merge_dicts(main_dict, merging_dict):
     for key, (new_count, new_sentiment_sum) in merging_dict.items():
         if key in main_dict:
@@ -35,6 +35,7 @@ def merge_dicts(main_dict, merging_dict):
             main_dict[key] = (new_count, new_sentiment_sum)
     return main_dict
 
+
 def get_params(tweet: json):
     data = tweet.get('doc').get('data')
     hour = data.get('created_at').split(':')[0]
@@ -42,50 +43,52 @@ def get_params(tweet: json):
     sentiment = data.get('sentiment', None)
     return hour, day, sentiment
 
-file_path = 'twitter-50mb.json'
+
+file_path = find_largest_json_file()
 
 total_bytes = os.path.getsize(file_path)
 each_bytes = total_bytes // size
 begin_position = rank * each_bytes
-end_position = (rank + 1) * each_bytes
-current_position = begin_position
+end_position = (rank + 1) * each_bytes if rank < size - 1 else total_bytes
 
 with open(file_path, 'r', encoding='utf-8') as tweet_file:
-    tweet_str = ''
-    tweet_file.seek(begin_position)
-    tweet_file.readline()
+    if rank != 0:
+        # Skip to the first complete record for this rank
+        tweet_file.seek(begin_position)
+        while True:
+            char = tweet_file.read(1)
+            begin_position += 1
+            if char == '{':
+                tweet_file.seek(begin_position - 1)  # Go back to the start of the JSON object
+                break
+            if begin_position >= end_position:
+                break
 
-    while (tweet_str := tweet_file.readline()) != '{}]}\n':
-        if current_position > end_position:
+    current_position = tweet_file.tell()
+    while current_position < end_position:
+        tweet_str = tweet_file.readline()
+        current_position += len(tweet_str.encode('utf-8'))
+
+        if tweet_str.strip() in ('', '{}]}\n'):
             break
 
-        tweet = json.loads(tweet_str[:-2])
-        hour, day, sentiment = get_params(tweet)
-        print(f"rank {rank}: hour{hour}")
+        try:
+            tweet = json.loads(tweet_str.rstrip(',\n'))
+            hour, day, sentiment = get_params(tweet)
 
-        hour_cnt = 0
-        hour_sentiment = 0.0
-        day_cnt = 0
-        day_sentiment = 0.0
+            if isinstance(sentiment, (float, int)): 
+                hour_cnt, hour_sentiment = hour_stats_dict.get(hour, (0, 0.0))
+                day_cnt, day_sentiment = day_stats_dict.get(day, (0, 0.0))
 
-        if hour in hour_stats_dict:
-            hour_cnt, hour_sentiment = hour_stats_dict[hour]
-
-        if day in day_stats_dict:
-            day_cnt, day_sentiment = day_stats_dict[day]
-
-        hour_cnt += 1
-        day_cnt += 1
-
-        if sentiment and isinstance(sentiment, float):
-            hour_sentiment += sentiment
-            day_sentiment += sentiment
-
-        hour_stats_dict[hour] = (hour_cnt, hour_sentiment)
-        day_stats_dict[day] = (day_cnt, day_sentiment)
-
-        # 这里可能不准确，会导致bug数据错误
-        current_position += len(tweet_str)
+                hour_stats_dict[hour] = (hour_cnt + 1, hour_sentiment + sentiment)
+                day_stats_dict[day] = (day_cnt + 1, day_sentiment + sentiment)
+            else:
+                # fail to get sentiment
+                hour_stats_dict[hour] = hour_stats_dict.get(hour, (0, 0.0))
+                day_stats_dict[day] = day_stats_dict.get(day, (0, 0.0))
+        except json.JSONDecodeError:
+            # Handle incomplete or malformed JSON
+            pass
 
 all_hour_stats = comm.gather(hour_stats_dict, root=0)
 all_day_stats = comm.gather(day_stats_dict, root=0)
@@ -94,15 +97,12 @@ if rank == 0:
     combined_hour_stats = {}
     combined_day_stats = {}
 
-    # merge hour dict
     for hour_stats in all_hour_stats:
         combined_hour_stats = merge_dicts(combined_hour_stats, hour_stats)
 
-    # merge day dict
     for day_stats in all_day_stats:
         combined_day_stats = merge_dicts(combined_day_stats, day_stats)
 
-    # Identify the hour and day with the highest sentiment sum and most records
     max_sentiment_hour = max(combined_hour_stats.items(), key=lambda item: item[1][1])
     max_records_hour = max(combined_hour_stats.items(), key=lambda item: item[1][0])
     max_sentiment_day = max(combined_day_stats.items(), key=lambda item: item[1][1])
